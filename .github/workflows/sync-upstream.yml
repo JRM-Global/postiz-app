@@ -5,6 +5,9 @@ on:
     - cron: '0 6 * * 1'  # Lunes 6am UTC
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -16,8 +19,15 @@ jobs:
 
       - name: Sync with upstream
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/gitroomhq/postiz-app.git
           git fetch upstream
           git checkout main
-          git merge upstream/main --no-edit -m "chore: sync upstream $(date +%Y-%m-%d)" || echo "No changes or conflict"
-          git push origin main
+          if git merge upstream/main --no-edit -m "chore: sync upstream $(date +%Y-%m-%d)"; then
+            git push origin main
+          else
+            echo "::error::Merge con upstream/main falló (probable conflicto). Resolver manualmente."
+            git merge --abort || true
+            exit 1
+          fi
