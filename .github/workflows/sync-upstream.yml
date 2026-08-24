@@ -26,7 +26,20 @@ jobs:
           # remote tracking branches (origin/main + upstream/main).
           git fetch upstream main
           git checkout -B main origin/main
+          antes=$(git rev-parse HEAD)
           if git merge FETCH_HEAD --no-edit -m "chore: sync upstream $(date +%Y-%m-%d)"; then
+            # GITHUB_TOKEN tiene prohibido crear o modificar archivos dentro de
+            # .github/workflows/ —GitHub rechaza el push entero con "refusing to
+            # allow a GitHub App to create or update workflow ... without
+            # `workflows` permission"—, y no hay permiso que se pueda pedir en
+            # el bloque `permissions:` para habilitarlo. Como acá los workflows
+            # son los del fork y no interesa traer los de upstream, se devuelven
+            # a como estaban y el push pasa.
+            if ! git diff --quiet "$antes" HEAD -- .github/workflows; then
+              echo "El merge tocó .github/workflows: se conservan los del fork."
+              git checkout "$antes" -- .github/workflows
+              git commit -q -m "chore: conservar los workflows del fork tras el sync"
+            fi
             git push origin main
           else
             echo "::error::Merge con upstream/main falló (probable conflicto). Resolver manualmente."
