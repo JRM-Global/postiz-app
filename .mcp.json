@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codebase-memory-mcp": {
+      "command": "/Users/jhonatan/.local/bin/codebase-memory-mcp",
+      "args": [],
+      "env": {
+        "CBM_CACHE_DIR": "/Users/jhonatan/proyectos/saas/postiz-app/.codebase-memory"
+      }
+    }
+  }
+}
