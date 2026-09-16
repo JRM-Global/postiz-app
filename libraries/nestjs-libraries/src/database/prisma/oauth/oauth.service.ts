@@ -7,18 +7,32 @@ import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { extractBearerToken } from '@gitroom/nestjs-libraries/chat/oauth-types';
 import { createHash } from 'crypto';
+import { OAuthApp } from '@prisma/client';
 
 const openAiOAuthClientId = () =>
   process.env.OPENAI_OAUTH_CLIENT_ID?.trim();
 
 const enableOidcEmailClaims = () => Boolean(openAiOAuthClientId());
 
-const oauthScope = (clientId: string) =>
-  [
-    ...(clientId === openAiOAuthClientId() ? ['openid', 'email'] : []),
-    'mcp:read',
-    'mcp:write',
-  ].join(' ');
+// Verified-domain match: exact host or a subdomain of it (spoof-safe, the
+// leading dot means evilclaude.ai and claude.ai.evil.com are both rejected)
+const isVerifiedHost = (host: string, verifiedDomains: string[]) =>
+  verifiedDomains.some(
+    (domain) => host === domain || host.endsWith('.' + domain)
+  );
+
+type EmailClaimsApp = Pick<OAuthApp, 'clientId' | 'dynamic' | 'redirectUris'>;
+
+// Schemes a browser would execute instead of navigating away from the
+// consent screen, so they can never be a redirect_uri
+const browserSchemes = [
+  'javascript:',
+  'data:',
+  'blob:',
+  'file:',
+  'vbscript:',
+  'about:',
+];
 
 @Injectable()
 export class OAuthService {
@@ -99,6 +113,7 @@ export class OAuthService {
 
   async registerDynamicClient(dto: RegisterClientDto) {
     const redirectUris = dto.redirect_uris.map((uri) => uri.trim());
+    const verifiedDomains = this.verifiedDomainList();
     for (const uri of redirectUris) {
       let parsed: URL;
       try {
@@ -109,31 +124,45 @@ export class OAuthService {
           HttpStatus.BAD_REQUEST
         );
       }
-      const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
-      if (parsed.protocol !== 'https:' && !isLoopback) {
+
+      // The consent screen navigates to the redirect_uri, so schemes the
+      // browser would execute in our origin can never be a callback
+      if (browserSchemes.includes(parsed.protocol)) {
         throw new HttpException(
-          { error: 'invalid_redirect_uri', error_description: 'redirect_uris must use https (http is allowed for loopback only)' },
+          { error: 'invalid_redirect_uri', error_description: `redirect_uri scheme "${parsed.protocol}" is not allowed` },
           HttpStatus.BAD_REQUEST
         );
       }
-    }
 
-    const verifiedDomains = this.verifiedDomainList();
-    if (verifiedDomains.length) {
-      for (const uri of redirectUris) {
-        const host = new URL(uri).hostname.toLowerCase();
-        const isVerified = verifiedDomains.some(
-          (domain) => host === domain || host.endsWith('.' + domain)
+      const isLoopback =
+        parsed.protocol === 'http:' &&
+        ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname);
+      // Private-use schemes (RFC 8252 §7.1), e.g.
+      // cursor://anysphere.cursor-mcp/oauth/callback
+      const isPrivateScheme = !['http:', 'https:'].includes(parsed.protocol);
+      if (parsed.protocol === 'http:' && !isLoopback) {
+        throw new HttpException(
+          { error: 'invalid_redirect_uri', error_description: 'redirect_uris must use https or a private-use scheme (http is allowed for loopback only)' },
+          HttpStatus.BAD_REQUEST
         );
-        if (!isVerified) {
-          throw new HttpException(
-            {
-              error: 'invalid_redirect_uri',
-              error_description: `redirect_uri host "${host}" is not a verified domain`,
-            },
-            HttpStatus.BAD_REQUEST
-          );
-        }
+      }
+
+      // Loopback and private-use callbacks never leave the user's machine
+      // (native clients like Cursor, Grok and Claude Code), so only web
+      // callbacks are held to the verified domain list
+      if (isLoopback || isPrivateScheme || !verifiedDomains.length) {
+        continue;
+      }
+
+      const host = parsed.hostname.toLowerCase();
+      if (!isVerifiedHost(host, verifiedDomains)) {
+        throw new HttpException(
+          {
+            error: 'invalid_redirect_uri',
+            error_description: `redirect_uri host "${host}" is not a verified domain`,
+          },
+          HttpStatus.BAD_REQUEST
+        );
       }
     }
 
@@ -151,6 +180,13 @@ export class OAuthService {
       .catch(() => {});
 
     const isPublicClient = dto.token_endpoint_auth_method === 'none';
+    // The token endpoint accepts the secret from either place; the stored
+    // method only mirrors back what the client asked for
+    const tokenEndpointAuthMethod = isPublicClient
+      ? 'none'
+      : dto.token_endpoint_auth_method === 'client_secret_basic'
+      ? 'client_secret_basic'
+      : 'client_secret_post';
     const clientId = 'pcd_' + makeId(32);
     const clientSecret = isPublicClient ? undefined : 'pcs_' + makeId(48);
 
@@ -160,7 +196,7 @@ export class OAuthService {
       redirectUris: JSON.stringify(redirectUris),
       clientId,
       clientSecret: clientSecret && AuthService.fixedEncryption(clientSecret),
-      tokenEndpointAuthMethod: isPublicClient ? 'none' : 'client_secret_post',
+      tokenEndpointAuthMethod,
     });
 
     return {
@@ -169,11 +205,58 @@ export class OAuthService {
       client_id_issued_at: Math.floor(app.createdAt.getTime() / 1000),
       client_name: app.name,
       redirect_uris: redirectUris,
-      token_endpoint_auth_method: isPublicClient ? 'none' : 'client_secret_post',
+      token_endpoint_auth_method: tokenEndpointAuthMethod,
       grant_types: ['authorization_code'],
       response_types: ['code'],
       scope: 'mcp:read mcp:write',
     };
+  }
+
+  // Email claims (openid/email scope + userinfo) go to the static ChatGPT app
+  // and to dynamically registered clients whose web callbacks all live on a
+  // verified domain (DCR_VERIFIED_DOMAINS). Everything else, including every
+  // dynamic client on a self-hosted install with no verified domains, only
+  // gets the mcp scopes
+  private allowsEmailClaims(app: EmailClaimsApp) {
+    if (!enableOidcEmailClaims()) {
+      return false;
+    }
+    if (app.clientId === openAiOAuthClientId()) {
+      return true;
+    }
+    if (!app.dynamic) {
+      return false;
+    }
+
+    const verifiedDomains = this.verifiedDomainList();
+    if (!verifiedDomains.length) {
+      return false;
+    }
+
+    const webHosts: string[] = [];
+    for (const uri of JSON.parse(app.redirectUris || '[]') as string[]) {
+      try {
+        const parsed = new URL(uri);
+        if (parsed.protocol === 'https:') {
+          webHosts.push(parsed.hostname.toLowerCase());
+        }
+      } catch {
+        return false;
+      }
+    }
+
+    return (
+      webHosts.length > 0 &&
+      webHosts.every((host) => isVerifiedHost(host, verifiedDomains))
+    );
+  }
+
+  private grantedScope(app: EmailClaimsApp) {
+    return [
+      ...(this.allowsEmailClaims(app) ? ['openid', 'email'] : []),
+      'mcp:read',
+      'mcp:write',
+    ].join(' ');
   }
 
   async validateAuthorizationRequest(
@@ -330,7 +413,7 @@ export class OAuthService {
       cus: paymentId,
       access_token: token,
       token_type: 'bearer',
-      scope: oauthScope(clientId),
+      scope: this.grantedScope(app),
     };
   }
 
@@ -366,7 +449,7 @@ export class OAuthService {
       );
     }
 
-    if (authorizationRecord.oauthApp.clientId !== openAiOAuthClientId()) {
+    if (!this.allowsEmailClaims(authorizationRecord.oauthApp)) {
       throw new HttpException(
         {
           error: 'insufficient_scope',
