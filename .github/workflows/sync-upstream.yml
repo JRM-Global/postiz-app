@@ -37,8 +37,19 @@ jobs:
             # a como estaban y el push pasa.
             if ! git diff --quiet "$antes" HEAD -- .github/workflows; then
               echo "El merge tocó .github/workflows: se conservan los del fork."
+              # Se BORRA el directorio antes de reponerlo, y no alcanza con
+              # `git checkout "$antes" -- .github/workflows` solo: eso repone lo
+              # que existía en $antes, pero NO saca lo que el merge AGREGÓ. El
+              # 31 de agosto upstream sumó staging-conflicts.yml: el checkout no
+              # tocó nada, el árbol quedó idéntico, `git commit` no tuvo nada que
+              # comitear y devolvió 1 — con `bash -e` eso mata el paso entero, y
+              # por eso el sync viene fallando desde entonces. De haber pasado,
+              # el push moría igual: GITHUB_TOKEN tampoco puede CREAR un workflow.
+              git rm -rq --ignore-unmatch .github/workflows
               git checkout "$antes" -- .github/workflows
-              git commit -q -m "chore: conservar los workflows del fork tras el sync"
+              # El commit sólo si de verdad quedó algo: si no, no se corta el sync.
+              git diff --cached --quiet ||
+                git commit -q -m "chore: conservar los workflows del fork tras el sync"
             fi
             git push origin main
           else
