@@ -41,7 +41,9 @@ jobs:
             fuera=$(git diff --name-only --diff-filter=U | grep -v '^\.github/workflows/' || true)
             if [ -z "$fuera" ]; then
               echo "Conflicto sólo en .github/workflows: se conservan los del fork."
-              git rm -rq --ignore-unmatch .github/workflows
+              # -f: el merge a medias deja workflows de upstream ya en el índice
+              # y sin él `git rm` se niega a sacarlos.
+              git rm -rqf --ignore-unmatch .github/workflows
               git checkout "$antes" -- .github/workflows
               git commit -q --no-edit -m "$msg"
               fusionado=1
