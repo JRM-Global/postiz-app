@@ -1,17 +1,26 @@
 import {
   IMediaProcessor,
   MediaProcessorJob,
+  MediaProcessorResult,
   MediaProcessorStatus,
 } from './media.processor.interface';
 
 // RunPod Serverless wraps every request as { input } and every result as
 // { id, status, output }. The worker returns failures as a normal result with
 // status "failed" inside, so a RunPod-level FAILED is only an unhandled crash.
-export class RunPodMediaProcessor implements IMediaProcessor {
+// Every job type of the service shares that envelope, so the endpoint decides
+// what the job and result look like.
+export class RunPodMediaProcessor<
+  Job = MediaProcessorJob,
+  Result = MediaProcessorResult
+> implements IMediaProcessor<Job, Result>
+{
   private _baseUrl: string;
 
   constructor(private _apiKey: string, endpointId: string) {
-    this._baseUrl = `https://api.runpod.ai/v2/${endpointId}`;
+    this._baseUrl = `${
+      process.env.RUNPOD_API_URL || 'https://api.runpod.ai/v2'
+    }/${endpointId}`;
   }
 
   private async request(path: string, init?: RequestInit) {
@@ -34,7 +43,7 @@ export class RunPodMediaProcessor implements IMediaProcessor {
     return response.json();
   }
 
-  async submit(job: MediaProcessorJob): Promise<string> {
+  async submit(job: Job): Promise<string> {
     const { id } = await this.request('/run', {
       method: 'POST',
       body: JSON.stringify({ input: job }),
@@ -47,7 +56,7 @@ export class RunPodMediaProcessor implements IMediaProcessor {
     return id;
   }
 
-  async status(jobId: string): Promise<MediaProcessorStatus> {
+  async status(jobId: string): Promise<MediaProcessorStatus<Result>> {
     const { status, output, error } = await this.request(`/status/${jobId}`, {
       method: 'GET',
     });

@@ -20,6 +20,12 @@ import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
 import { PaymentService } from '@gitroom/nestjs-libraries/services/payment/payment.service';
 import { BillingSyncDto } from '@gitroom/nestjs-libraries/dtos/billing/billing.sync.dto';
+import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
+import {
+  AuthorizationActions,
+  Sections,
+} from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+import dayjs from 'dayjs';
 
 @ApiTags('Billing')
 @Controller('/billing')
@@ -73,11 +79,15 @@ export class BillingController {
   async finishTrial(@GetOrgFromRequest() org: Organization) {
     const provider = await this.provider(org);
     try {
-      await provider.finishTrial(org);
-    } catch (err) {}
-    return {
-      finish: true,
-    };
+      const action = await provider.finishTrial(org);
+      if (action.requiresAction) {
+        return { finish: false, ...action };
+      }
+      return { finish: true };
+    } catch (err) {
+      console.error('finishTrial failed', err);
+      return { finish: false };
+    }
   }
 
   @Get('/is-trial-finished')
@@ -158,6 +168,17 @@ export class BillingController {
     };
   }
 
+  @Get('/invoices')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async getInvoices(@GetOrgFromRequest() org: Organization) {
+    return (await this.provider(org)).getInvoices(org.id);
+  }
+
+  @Get('/renewal')
+  async getRenewal(@GetOrgFromRequest() org: Organization) {
+    return (await this.provider(org)).getRenewalDate(org.id);
+  }
+
   @Get('/')
   getCurrentBilling(@GetOrgFromRequest() org: Organization) {
     return this._paymentService.getSubscription(org.id);
@@ -166,17 +187,27 @@ export class BillingController {
   @Post('/cancel')
   async cancel(
     @GetOrgFromRequest() org: Organization,
-    @GetUserFromRequest() user: User,
-    @Body() body: { feedback: string }
+    @GetUserFromRequest() user: User
   ) {
-    await this._notificationService.sendEmail(
-      process.env.EMAIL_FROM_ADDRESS,
-      'Subscription Cancelled',
-      `Organization ${org.name} has cancelled their subscription because: ${body.feedback}`,
-      user.email
-    );
+    const result = await (await this.provider(org)).setToCancel(org.id);
 
-    return (await this.provider(org)).setToCancel(org.id);
+    if (result.cancel_at && dayjs(result.cancel_at).isAfter(dayjs())) {
+      try {
+        await this._notificationService.sendEmail(
+          user.email,
+          'Your Postiz subscription is set to cancel',
+          `Your subscription is pending cancellation and will end on ${dayjs(
+            result.cancel_at
+          ).format(
+            'D MMM, YYYY'
+          )} (UTC), the end of your current billing cycle. Until then you can keep using Postiz as usual. Changed your mind? You can reactivate at any time from the <a href="${
+            process.env.FRONTEND_URL
+          }/billing">Billing page</a>.`
+        );
+      } catch (err) {}
+    }
+
+    return result;
   }
 
   @Post('/prorate')
