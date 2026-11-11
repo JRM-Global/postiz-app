@@ -27,7 +27,27 @@ jobs:
           git fetch upstream main
           git checkout -B main origin/main
           antes=$(git rev-parse HEAD)
-          if git merge FETCH_HEAD --no-edit -m "chore: sync upstream $(date +%Y-%m-%d)"; then
+          msg="chore: sync upstream $(date +%Y-%m-%d)"
+          fusionado=0
+          if git merge FETCH_HEAD --no-edit -m "$msg"; then
+            fusionado=1
+          else
+            # Un conflicto que cae SÓLO dentro de .github/workflows no es un
+            # conflicto de verdad: esos archivos igual se pisan con los del fork
+            # más abajo. Pasa cada vez que upstream modifica un workflow que acá
+            # se borró (staging-conflicts.yml, noviembre): modify/delete. Se
+            # resuelve quedándose con lo del fork y se sigue. Cualquier otro
+            # conflicto sí corta el sync.
+            fuera=$(git diff --name-only --diff-filter=U | grep -v '^\.github/workflows/' || true)
+            if [ -z "$fuera" ]; then
+              echo "Conflicto sólo en .github/workflows: se conservan los del fork."
+              git rm -rq --ignore-unmatch .github/workflows
+              git checkout "$antes" -- .github/workflows
+              git commit -q --no-edit -m "$msg"
+              fusionado=1
+            fi
+          fi
+          if [ "$fusionado" = 1 ]; then
             # GITHUB_TOKEN tiene prohibido crear o modificar archivos dentro de
             # .github/workflows/ —GitHub rechaza el push entero con "refusing to
             # allow a GitHub App to create or update workflow ... without
