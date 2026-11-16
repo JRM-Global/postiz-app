@@ -12,6 +12,7 @@ import { MediumTags } from '@gitroom/frontend/components/new-launch/providers/me
 import { useWatch } from 'react-hook-form';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { Select } from '@gitroom/react/form/select';
+import { Checkbox } from '@gitroom/react/form/checkbox';
 import { YoutubePreview } from '@gitroom/frontend/components/new-launch/providers/youtube/youtube.preview';
 import { useIntegration } from '@gitroom/frontend/components/launches/helpers/use.integration';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
@@ -47,11 +48,18 @@ const YoutubeSettings: FC = () => {
   // the thumbnail is set from the media settings now, older posts may still
   // carry one here, and it wins over the media thumbnail
   const thumbnail = useWatch({ control, name: 'thumbnail' });
-  // the post text is the video description (snippet.description)
-  const description = useMemo(
-    () => stripHtmlValidation('normal', value?.[0]?.content || '', true).trim(),
-    [value]
-  );
+  // the post text is the video description (snippet.description), cleaned
+  // the same way as when it is posted
+  const description = useMemo(() => {
+    const content = value?.[0]?.content || '';
+    return stripHtmlValidation(
+      'normal',
+      content,
+      true,
+      false,
+      !/<\/?[a-z][\s\S]*>/i.test(content)
+    ).trim();
+  }, [value]);
   return (
     <div className="flex flex-col">
       <Input label="Title" {...register('title')} maxLength={100} />
@@ -99,6 +107,15 @@ const YoutubeSettings: FC = () => {
         ))}
       </Select>
       <MediumTags label="Tags" {...register('tags')} />
+      <div className="mt-[18px]">
+        <Checkbox
+          label={t(
+            'youtube_made_with_ai',
+            'Made with AI (realistic altered or synthetic content)'
+          )}
+          {...register('made_with_ai')}
+        />
+      </div>
       {!!thumbnail?.path && (
         <div className="mt-[20px] flex items-center gap-[10px] text-[12px]">
           <div className="flex-1">
